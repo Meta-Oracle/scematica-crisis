@@ -6,6 +6,8 @@ import { Camera } from './Camera'
 import { EnemyManager } from './EnemyManager'
 import { Combo } from './Combo'
 import { HUD } from './HUD'
+import { RagdollSystem } from './Ragdoll'
+import { BloodSystem } from './Blood'
 
 const MELEE_RANGE = 4.0
 const MELEE_DMG = [30, 45, 80] as const   // light, medium, finisher
@@ -38,6 +40,8 @@ export class Game {
   private enemies: EnemyManager
   private combo: Combo
   private hud: HUD
+  private ragdolls: RagdollSystem
+  private blood: BloodSystem
 
   private hp = 100
   private score = 0
@@ -77,6 +81,8 @@ export class Game {
     this.combo = new Combo()
     this.hud = new HUD()
     this.hud.hide()
+    this.ragdolls = new RagdollSystem(this.scene)
+    this.blood = new BloodSystem(this.scene)
 
     this.buildScreens()
     this.showMenu()
@@ -147,6 +153,10 @@ export class Game {
       if (this.hp === 0) { this.endGame(); return }
     }
 
+    // ── Ragdolls & blood ──
+    this.ragdolls.update(rawDt)
+    this.blood.update(rawDt)
+
     // ── Combo decay ──
     this.combo.update(dt)
 
@@ -193,17 +203,29 @@ export class Game {
       if (e.isDead) continue
       const box = new THREE.Box3().setFromObject(e.mesh)
       if (this.raycaster.ray.intersectsBox(box)) {
-        const headDist = this.raycaster.ray.distanceToPoint(e.headWorldPos())
+        const headPos = e.headWorldPos()
+        const headDist = this.raycaster.ray.distanceToPoint(headPos)
         const hs = headDist < 0.35
         const killed = e.takeDamage(SNIPER_DMG, hs)
         hit = true
-        if (hs) this.hud.flash('HEADSHOT!', 1)
+
+        if (hs) {
+          this.hud.flash('HEADSHOT!', 1)
+          // Explosive headshot blood burst
+          this.blood.splat(headPos, 60, 2.5)
+          this.blood.splat(headPos, 30, 1.5)
+        } else {
+          this.blood.splat(e.position.clone().setY(e.position.y + 1.0), 18, 1.0)
+        }
+
         if (killed) {
           this.combo.hit()
           this.score += Math.floor(e.reward * (hs ? 2 : 1) * this.combo.multiplier)
+          this.ragdolls.spawnRagdoll(e.position.clone(), e.color, e.scale)
+          if (!hs) this.blood.splat(e.position.clone().setY(e.position.y + 0.8), 35, 1.8)
         }
-        // spawn tracer line
-        this.spawnTracer(this.camera.cam.position, e.headWorldPos())
+
+        this.spawnTracer(this.camera.cam.position, headPos)
         break
       }
     }
@@ -245,14 +267,22 @@ export class Game {
 
       const killed = e.takeDamage(dmg)
       hitAny = true
+      const hitPos = e.position.clone().setY(e.position.y + 1.0)
       if (killed) {
         this.combo.hit()
         this.score += Math.floor(e.reward * 1.6 * this.combo.multiplier)
+        this.ragdolls.spawnRagdoll(e.position.clone(), e.color, e.scale)
+        this.blood.splat(hitPos, 40, aoe ? 2.2 : 1.6)
+      } else {
+        this.blood.splat(hitPos, 12, 0.8)
       }
     }
 
     if (hitAny) {
       this.hud.flash(MELEE_NAMES[pos], 0.6)
+      this.hud.showMeleeHit(pos as 0 | 1 | 2)
+      const shakeAmts = [0.12, 0.22, 0.48] as const
+      this.camera.shake(shakeAmts[pos])
     }
   }
 
@@ -282,6 +312,8 @@ export class Game {
     this.waveCd = 2.5
     this.combo.reset()
     this.enemies.clear()
+    this.ragdolls.clear()
+    this.blood.clear()
     this.player.position.set(0, 0, 0)
     this.menuEl.classList.remove('vis')
     this.goEl.classList.remove('vis')
@@ -294,6 +326,8 @@ export class Game {
     this.running = false
     this.gameOver = true
     this.enemies.clear()
+    this.ragdolls.clear()
+    this.blood.clear()
     this.hud.hide()
     document.exitPointerLock()
     this.goEl.querySelector('#go-score')!.textContent = this.score.toLocaleString()
