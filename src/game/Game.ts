@@ -61,6 +61,9 @@ export class Game {
   private ragdolls: RagdollSystem
   private blood: BloodSystem
 
+  // Active bullet tracers: each entry holds lines to fade
+  private tracers: { lines: THREE.Line[]; age: number; linger: number; lifetime: number }[] = []
+
   private hp = 100
   private score = 0
   private wave = 1
@@ -200,6 +203,26 @@ export class Game {
     // ── Ragdolls & blood ──
     this.ragdolls.update(rawDt)
     this.blood.update(rawDt)
+
+    // ── Tracer fade ──
+    this.tracers = this.tracers.filter(tr => {
+      tr.age += rawDt
+      const fadeStart = tr.linger
+      const fadeEnd   = tr.linger + tr.lifetime
+      if (tr.age >= fadeEnd) {
+        for (const l of tr.lines) this.scene.remove(l)
+        return false
+      }
+      const opacity = tr.age < fadeStart
+        ? 0.9
+        : 0.9 * (1 - (tr.age - fadeStart) / tr.lifetime)
+      for (const l of tr.lines) {
+        const m = l.material as THREE.LineBasicMaterial
+        m.opacity = opacity
+        m.needsUpdate = true
+      }
+      return true
+    })
 
     // ── Combo decay ──
     this.combo.update(dt)
@@ -383,73 +406,64 @@ export class Game {
   private spawnLightningTracer(from: THREE.Vector3, to: THREE.Vector3, streak: number) {
     const powerFrac = streak / HS_STREAK_MAX   // 0..1
 
-    // Color interpolation: dark blue → neon blue → indigo → purple
     const colorA = lerpHex(0x001166, 0x330055, powerFrac)
     const colorB = lerpHex(0x00aaff, 0xcc00ff, powerFrac)
 
-    const segments = Math.max(2, Math.round(2 + powerFrac * 10))
-    const jitter   = powerFrac * 3.2   // max zigzag displacement
-
-    // Spawn 1-3 overlapping traces for lightning "branching"
+    const segments    = Math.max(2, Math.round(2 + powerFrac * 10))
+    const jitter      = powerFrac * 3.2
     const branchCount = 1 + Math.floor(powerFrac * 2.5)
+
+    // Linger time (bright before fading) and fade duration both grow with power
+    const linger   = 0.18 + powerFrac * 0.22   // 0.18s → 0.40s
+    const lifetime = 0.55 + powerFrac * 0.85   // 0.55s → 1.40s total fade
+
+    const lines: THREE.Line[] = []
 
     for (let b = 0; b < branchCount; b++) {
       const pts: THREE.Vector3[] = []
       const cols: number[] = []
-
       for (let i = 0; i <= segments; i++) {
         const t = i / segments
         const p = from.clone().lerp(to, t)
-
         if (i > 0 && i < segments) {
-          const off = jitter * (Math.random() - 0.5)
           const perp = new THREE.Vector3(-(to.z - from.z), 0, to.x - from.x).normalize()
-          p.addScaledVector(perp, off)
+          p.addScaledVector(perp, jitter * (Math.random() - 0.5))
           p.y += jitter * 0.5 * (Math.random() - 0.5)
         }
-
         pts.push(p)
-
-        // Vertex color: dark at start, bright at end
-        const [r, g, blue] = hexToRGB(lerpHex(colorA, colorB, t))
-        cols.push(r, g, blue)
+        const [r, g, bl] = hexToRGB(lerpHex(colorA, colorB, t))
+        cols.push(r, g, bl)
       }
-
       const geo = new THREE.BufferGeometry().setFromPoints(pts)
       geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3))
-
       const mat = new THREE.LineBasicMaterial({
-        vertexColors: true,
-        transparent: true,
-        opacity: 0.85 + (b === 0 ? 0 : -0.3),
-        linewidth: 1,
+        vertexColors: true, transparent: true,
+        opacity: b === 0 ? 0.9 : 0.55,
       })
-
       const line = new THREE.Line(geo, mat)
       this.scene.add(line)
+      lines.push(line)
+    }
 
-      // Lightning "flicker" — for high power, rapidly redraw
-      const lifetime = 60 + powerFrac * 80  // ms
-      if (powerFrac > 0.4 && b === 0) {
-        // Spawn a secondary redraw for flicker effect
-        setTimeout(() => {
-          this.scene.remove(line)
-          this.spawnLightningBolt(from, to, powerFrac, colorA, colorB, segments, jitter * 0.7)
-        }, lifetime * 0.5)
-      }
-      setTimeout(() => this.scene.remove(line), lifetime)
+    this.tracers.push({ lines, age: 0, linger, lifetime })
+
+    // For high power, spawn a secondary "flicker" bolt that fades fast
+    if (powerFrac > 0.4) {
+      const flickerLines: THREE.Line[] = []
+      const fl = this.buildBolt(from, to, colorA, colorB, segments, jitter * 0.65)
+      this.scene.add(fl)
+      flickerLines.push(fl)
+      this.tracers.push({ lines: flickerLines, age: -0.12, linger: 0.05, lifetime: 0.25 })
     }
   }
 
-  private spawnLightningBolt(
+  private buildBolt(
     from: THREE.Vector3, to: THREE.Vector3,
-    powerFrac: number,
     colorA: number, colorB: number,
     segments: number, jitter: number
-  ) {
+  ): THREE.Line {
     const pts: THREE.Vector3[] = []
     const cols: number[] = []
-
     for (let i = 0; i <= segments; i++) {
       const t = i / segments
       const p = from.clone().lerp(to, t)
@@ -462,13 +476,9 @@ export class Game {
       const [r, g, b] = hexToRGB(lerpHex(colorA, colorB, t))
       cols.push(r, g, b)
     }
-
     const geo = new THREE.BufferGeometry().setFromPoints(pts)
     geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3))
-    const mat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.7 })
-    const line = new THREE.Line(geo, mat)
-    this.scene.add(line)
-    setTimeout(() => this.scene.remove(line), 50 + powerFrac * 40)
+    return new THREE.Line(geo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.7 }))
   }
 
   private launchWave() {
@@ -494,6 +504,8 @@ export class Game {
     this.enemies.clear()
     this.ragdolls.clear()
     this.blood.clear()
+    for (const tr of this.tracers) for (const l of tr.lines) this.scene.remove(l)
+    this.tracers = []
     this.player.position.set(0, 0, 0)
     this.menuEl.classList.remove('vis')
     this.goEl.classList.remove('vis')
