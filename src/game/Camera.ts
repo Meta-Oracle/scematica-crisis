@@ -10,6 +10,9 @@ export class Camera {
   readonly cam: THREE.PerspectiveCamera
   private fovCurrent = FOV_NORMAL
   private shakeMag = 0
+  private killCamTimer = 0
+  private killCamTarget = new THREE.Vector3()
+  private killCamAngle  = 0
 
   constructor(renderer: THREE.WebGLRenderer) {
     this.cam = new THREE.PerspectiveCamera(FOV_NORMAL, window.innerWidth / window.innerHeight, 0.05, 300)
@@ -23,10 +26,23 @@ export class Camera {
   }
 
   update(rawDt: number, player: Player, sniper: boolean) {
-    const targetFov = sniper ? FOV_ZOOM : FOV_NORMAL
+    const targetFov = sniper ? FOV_ZOOM : (this.killCamTimer > 0 ? 55 : FOV_NORMAL)
     this.fovCurrent += (targetFov - this.fovCurrent) * Math.min(1, rawDt * 12)
     this.cam.fov = this.fovCurrent
     this.cam.updateProjectionMatrix()
+
+    if (this.killCamTimer > 0) {
+      this.killCamTimer -= rawDt
+      this.killCamAngle += rawDt * 1.8
+      const r = 6
+      this.cam.position.set(
+        this.killCamTarget.x + Math.cos(this.killCamAngle) * r,
+        this.killCamTarget.y + 3.5,
+        this.killCamTarget.z + Math.sin(this.killCamAngle) * r,
+      )
+      this.cam.lookAt(this.killCamTarget)
+      return
+    }
 
     if (sniper) {
       this.cam.position.copy(player.eyePos())
@@ -40,7 +56,6 @@ export class Camera {
       const lookTarget = new THREE.Vector3(player.position.x, EYE_HEIGHT * 0.6, player.position.z)
       this.cam.lookAt(lookTarget)
 
-      // Camera shake (melee impact)
       if (this.shakeMag > 0.001) {
         this.cam.position.x += (Math.random() - 0.5) * this.shakeMag
         this.cam.position.y += (Math.random() - 0.5) * this.shakeMag * 0.6
@@ -49,7 +64,13 @@ export class Camera {
     }
   }
 
-  shake(intensity: number) {
-    this.shakeMag = Math.max(this.shakeMag, intensity)
+  shake(intensity: number) { this.shakeMag = Math.max(this.shakeMag, intensity) }
+
+  triggerKillCam(pos: THREE.Vector3, duration = 1.1) {
+    this.killCamTarget.copy(pos)
+    this.killCamTimer = duration
+    this.killCamAngle = Math.random() * Math.PI * 2
   }
+
+  get isKillCamActive() { return this.killCamTimer > 0 }
 }

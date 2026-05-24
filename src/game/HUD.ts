@@ -124,6 +124,38 @@ const CSS = `
   }
   #hud-dash.ready { color:#00aaff;text-shadow:0 0 10px #00aaff; }
 
+  /* Boss HP bar */
+  #hud-boss {
+    position:absolute;top:0;left:50%;transform:translateX(-50%);
+    width:480px;max-width:80vw;padding-top:12px;
+    display:none;text-align:center;
+  }
+  #hud-boss.vis { display:block; }
+  #hud-boss-name { font-size:11px;letter-spacing:6px;color:#ff00cc;text-shadow:0 0 16px #ff00cc;margin-bottom:5px; }
+  #hud-boss-track { background:#1a0018;height:10px;border:1px solid #ff00cc44; }
+  #hud-boss-fill { background:linear-gradient(90deg,#880055,#ff00cc);height:100%;transition:width .1s; }
+  #hud-boss-phase { font-size:8px;letter-spacing:3px;color:#660044;margin-top:3px; }
+
+  /* Action prompts (parry / execution) */
+  #hud-action-prompt {
+    position:absolute;top:56%;left:50%;transform:translateX(-50%);
+    font-size:13px;letter-spacing:5px;
+    pointer-events:none;opacity:0;
+    transition:opacity .12s;
+  }
+  #hud-action-prompt.vis { opacity:1; }
+  #hud-action-prompt.parry { color:#ffdd00;text-shadow:0 0 18px #ffdd00; }
+  #hud-action-prompt.exec  { color:#ff4400;text-shadow:0 0 18px #ff4400; }
+
+  /* Chromatic aberration flash */
+  @keyframes chroma-flash {
+    0%   { filter:hue-rotate(0deg)   saturate(1); }
+    25%  { filter:hue-rotate(-18deg) saturate(2.5); }
+    75%  { filter:hue-rotate(18deg)  saturate(2.2); }
+    100% { filter:hue-rotate(0deg)   saturate(1); }
+  }
+  #app canvas.chroma { animation:chroma-flash 0.22s ease-out forwards; }
+
   /* ── Melee slash effects ── */
   .slash-wrap { position:absolute;top:50%;left:50%;pointer-events:none;overflow:visible; }
   .slash-inner { height:3px;border-radius:3px;transform:scaleX(0);opacity:0;transform-origin:center center; }
@@ -217,6 +249,11 @@ export class HUD {
   private dmgAccum = 0
   private dmgTimer = 0
 
+  private bossEl!: HTMLElement
+  private bossFill!: HTMLElement
+  private bossPhaseEl!: HTMLElement
+  private actionPrompt!: HTMLElement
+
   constructor() {
     const style = document.createElement('style')
     style.textContent = CSS
@@ -281,6 +318,12 @@ export class HUD {
       <div class="slash-wrap" id="slash-fin"><div class="slash-inner"></div></div>
       <div id="hud-sword-move"></div>
       <div id="hud-dmg-pop"></div>
+      <div id="hud-boss">
+        <div id="hud-boss-name">⬡ CRISIS ENTITY ⬡</div>
+        <div id="hud-boss-track"><div id="hud-boss-fill" style="width:100%"></div></div>
+        <div id="hud-boss-phase">PHASE I</div>
+      </div>
+      <div id="hud-action-prompt"></div>
       <div id="hud-msg"></div>
     `
     document.body.appendChild(this.root)
@@ -308,7 +351,11 @@ export class HUD {
     this.dashEl      = document.getElementById('hud-dash')!
     this.powerEl     = document.getElementById('hud-power')!
     this.dmgPop      = document.getElementById('hud-dmg-pop')!
-    this.powerPips   = Array.from({length:10}).map((_,i) => document.getElementById(`pip-${i}`)!)
+    this.powerPips    = Array.from({length:10}).map((_,i) => document.getElementById(`pip-${i}`)!)
+    this.bossEl       = document.getElementById('hud-boss')!
+    this.bossFill     = document.getElementById('hud-boss-fill')!
+    this.bossPhaseEl  = document.getElementById('hud-boss-phase')!
+    this.actionPrompt = document.getElementById('hud-action-prompt')!
   }
 
   update(
@@ -434,6 +481,23 @@ export class HUD {
         trigger(this.slashFin, 160)
         trigger(this.devFlash, 180)
         break
+    }
+  }
+
+  showBossBar(hpFrac: number, phase: number) {
+    this.bossEl.classList.add('vis')
+    this.bossFill.style.width = `${Math.max(0, hpFrac) * 100}%`
+    this.bossPhaseEl.textContent = ['PHASE I', 'PHASE II', 'PHASE III'][phase - 1] ?? 'PHASE I'
+  }
+
+  hideBossBar() { this.bossEl.classList.remove('vis') }
+
+  setActionPrompt(type: 'parry' | 'exec' | null) {
+    if (!type) {
+      this.actionPrompt.className = ''
+    } else {
+      this.actionPrompt.textContent = type === 'parry' ? '[E]  PARRY!' : '[E]  EXECUTE'
+      this.actionPrompt.className = `vis ${type}`
     }
   }
 

@@ -29,10 +29,8 @@ export class NeuralBrain {
         out[i] = Math.max(-6, Math.min(6, out[i]))
       }
     }
-    blend(a.w1, b.w1, child.w1)
-    blend(a.b1, b.b1, child.b1)
-    blend(a.w2, b.w2, child.w2)
-    blend(a.b2, b.b2, child.b2)
+    blend(a.w1, b.w1, child.w1); blend(a.b1, b.b1, child.b1)
+    blend(a.w2, b.w2, child.w2); blend(a.b2, b.b2, child.b2)
     return child
   }
 
@@ -53,6 +51,19 @@ export class NeuralBrain {
     }
     return [o[0], o[1], o[2], o[3]]
   }
+
+  toJSON() {
+    return {
+      w1: Array.from(this.w1), b1: Array.from(this.b1),
+      w2: Array.from(this.w2), b2: Array.from(this.b2),
+    }
+  }
+
+  static fromJSON(d: { w1: number[]; b1: number[]; w2: number[]; b2: number[] }): NeuralBrain {
+    const b = new NeuralBrain()
+    b.w1.set(d.w1); b.b1.set(d.b1); b.w2.set(d.w2); b.b2.set(d.b2)
+    return b
+  }
 }
 
 export class BrainPool {
@@ -65,36 +76,49 @@ export class BrainPool {
     this.size    = size
     this.pool    = Array.from({ length: size }, () => NeuralBrain.random())
     this.fitness = new Array(size).fill(0)
+    this.load()
   }
 
-  next(): NeuralBrain {
-    return this.pool[this.index++ % this.size]
-  }
+  next(): NeuralBrain { return this.pool[this.index++ % this.size] }
 
   recordFitness(brain: NeuralBrain, timeAlive: number, gotKill: boolean) {
     const i = this.pool.indexOf(brain)
     if (i >= 0) this.fitness[i] = Math.max(this.fitness[i], timeAlive + (gotKill ? 5 : 0))
   }
 
-  // Generational evolution: called between waves
   evolve() {
-    const ranked = this.pool
-      .map((b, i) => ({ b, f: this.fitness[i] }))
-      .sort((a, b) => b.f - a.f)
-
+    const ranked = this.pool.map((b, i) => ({ b, f: this.fitness[i] })).sort((a, b) => b.f - a.f)
     const next: NeuralBrain[] = []
-
-    // Elitism: keep top 4
     for (let i = 0; i < Math.min(4, ranked.length); i++) next.push(ranked[i].b)
-
-    // Fill rest via tournament crossover
     while (next.length < this.size) {
       const t = () => ranked[Math.floor(Math.random() * Math.min(8, ranked.length))].b
       next.push(NeuralBrain.crossover(t(), t()))
     }
-
     this.pool    = next
     this.fitness = new Array(this.size).fill(0)
     this.index   = 0
+    this.save()
+  }
+
+  save() {
+    try {
+      const top4 = [...this.pool]
+        .map((b, i) => ({ b, f: this.fitness[i] }))
+        .sort((a, b) => b.f - a.f)
+        .slice(0, 4)
+        .map(x => x.b.toJSON())
+      localStorage.setItem('scematica-brains', JSON.stringify(top4))
+    } catch {}
+  }
+
+  load() {
+    try {
+      const raw = localStorage.getItem('scematica-brains')
+      if (!raw) return
+      const data = JSON.parse(raw)
+      for (let i = 0; i < Math.min(4, data.length, this.pool.length); i++) {
+        this.pool[i] = NeuralBrain.fromJSON(data[i])
+      }
+    } catch {}
   }
 }

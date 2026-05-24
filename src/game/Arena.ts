@@ -11,15 +11,32 @@ function sr(seed: number): number {
   return x - Math.floor(x)
 }
 
+// Weather themes: [fogColor, skyColor, fogDensity]
+const THEMES: [number, number, number][] = [
+  [0x020210, 0x020210, 0.0095],  // 0 deep blue-black (default)
+  [0x150208, 0x0d0106, 0.011 ],  // 1 crimson
+  [0x011208, 0x010d06, 0.010 ],  // 2 toxic green
+  [0x0d0518, 0x080010, 0.0085],  // 3 void purple
+  [0x010d10, 0x010a0d, 0.0092],  // 4 aurora teal
+  [0x180a00, 0x100600, 0.012 ],  // 5 inferno orange (boss)
+]
+
 export class Arena {
-  private terrain: THREE.Group // follows player so floor looks infinite
-  private structures: THREE.Group // static world objects
+  private terrain: THREE.Group
+  private structures: THREE.Group
+  private scene: THREE.Scene
+  private fog: THREE.FogExp2
+  private targetTheme = 0
+  private currentFogColor = new THREE.Color(0x020210)
+  private currentSkyColor = new THREE.Color(0x020210)
 
   constructor(scene: THREE.Scene) {
-    scene.fog = new THREE.FogExp2(0x020210, 0.0095)
+    this.scene = scene
+    this.fog = new THREE.FogExp2(0x020210, 0.0095)
+    scene.fog = this.fog
     scene.background = new THREE.Color(0x020210)
 
-    this.terrain = new THREE.Group()
+    this.terrain    = new THREE.Group()
     this.structures = new THREE.Group()
 
     this.buildFloor()
@@ -31,13 +48,36 @@ export class Arena {
     scene.add(this.structures)
   }
 
-  update(pos: THREE.Vector3) {
-    // Snap to minor-grid cell so grid lines always appear at fixed world coords
+  setWeatherTheme(wave: number) {
+    // Boss waves use inferno theme, others cycle
+    this.targetTheme = wave % 5 === 0 ? 5 : (wave % (THEMES.length - 1))
+  }
+
+  update(pos: THREE.Vector3, dt = 0) {
     this.terrain.position.set(
       Math.round(pos.x / 5) * 5,
       0,
       Math.round(pos.z / 5) * 5
     )
+
+    // Interpolate weather
+    if (dt > 0) {
+      const [tFog, tSky, tDens] = THEMES[this.targetTheme]
+      const speed = dt * 0.5
+      this.currentFogColor.lerp(new THREE.Color(tFog), speed)
+      this.currentSkyColor.lerp(new THREE.Color(tSky), speed)
+      this.fog.color.copy(this.currentFogColor)
+      this.fog.density += (tDens - this.fog.density) * speed
+      ;(this.scene.background as THREE.Color).copy(this.currentSkyColor)
+    }
+  }
+
+  getStructurePositions(): THREE.Vector3[] {
+    const out: THREE.Vector3[] = []
+    this.structures.children.forEach(c => {
+      if (c instanceof THREE.Mesh) out.push(c.position.clone())
+    })
+    return out
   }
 
   private buildFloor() {

@@ -47,20 +47,22 @@ export class Player {
   private lKnee:  THREE.Group
 
   // Walk / idle state
-  private walkT     = 0
-  private walkBlend = 0
-  private breathT   = 0
+  private walkT      = 0
+  private walkBlend  = 0
+  private breathT    = 0
+  private leanTarget = 0  // stored so animation can read it cleanly
 
   // Sword animation state
   private moveT    = 0
   private moveDur  = 0
   private moveType: SwordMove = 'slash'
-  private spinOffset = 0  // whirlwind accumulated spin
+  private spinOffset = 0
 
   // Dash state
   private dashT   = 0
   private dashDir = new THREE.Vector3()
   private dashCd  = 0
+  private baseDashCd = DASH_COOLDOWN
 
   constructor(scene: THREE.Scene) {
     this.mesh      = new THREE.Group()
@@ -228,7 +230,7 @@ export class Player {
     scene.add(this.mesh)
   }
 
-  update(dt: number, input: InputManager, _arenaHalf: number): { dashed: boolean } {
+  update(dt: number, input: InputManager, _arenaHalf: number, opts?: { speedMult?: number; dashCdBonus?: number }): { dashed: boolean } {
     const { dx, dy } = input.consumeDelta()
     this.yaw   -= dx * LOOK_SENS
     this.pitch  = Math.max(-PITCH_MAX, Math.min(PITCH_MAX, this.pitch - dy * LOOK_SENS))
@@ -241,6 +243,10 @@ export class Player {
     if (input.isKey('KeyA')) dir.x -= 1
     if (input.isKey('KeyD')) dir.x += 1
 
+    const speedMult   = opts?.speedMult  ?? 1.0
+    const dashCdBonus = opts?.dashCdBonus ?? 0
+    const effectiveDashCd = Math.max(0.25, DASH_COOLDOWN - dashCdBonus)
+
     // ── Dash ──
     let dashed = false
     if (input.wasKeyPressed('Space') && this.dashCd <= 0) {
@@ -248,7 +254,7 @@ export class Player {
       dashDir.applyQuaternion(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.yaw))
       this.dashDir.copy(dashDir)
       this.dashT  = DASH_DUR
-      this.dashCd = DASH_COOLDOWN
+      this.dashCd = effectiveDashCd
       dashed = true
     }
 
@@ -261,7 +267,7 @@ export class Player {
       const fd = dir.clone().normalize().applyQuaternion(
         new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.yaw)
       )
-      this.position.addScaledVector(fd, MOVE_SPEED * dt)
+      this.position.addScaledVector(fd, MOVE_SPEED * speedMult * dt)
     }
 
     this.mesh.position.copy(this.position)
@@ -278,9 +284,9 @@ export class Player {
     const stepBob   = Math.abs(Math.sin(this.walkT)) * 0.085 * this.walkBlend
     this.bodyGroup.position.y = breathBob + stepBob + dashBob
 
-    // Forward lean
-    const leanTarget = (moving || this.dashT > 0) ? 0.14 : 0
-    this.bodyGroup.rotation.x += (leanTarget - this.bodyGroup.rotation.x) * Math.min(1, dt * 10)
+    // Forward lean — store so animation code can read a stable value
+    this.leanTarget = (moving || this.dashT > 0) ? 0.14 : 0
+    this.bodyGroup.rotation.x += (this.leanTarget - this.bodyGroup.rotation.x) * Math.min(1, dt * 10)
 
     // ── Leg animation ──
     const legSwing = Math.sin(this.walkT) * 0.88 * this.walkBlend
@@ -290,7 +296,7 @@ export class Player {
     this.lKnee.rotation.x = Math.max(0,  legSwing) * 0.85
 
     // ── Arm + Sword animation ──
-    this.updateSwordAnim(dt, moving)
+    this.updateSwordAnim(dt)
 
     // Idle sway
     const sway = Math.sin(this.breathT * 0.5) * 0.05
@@ -302,79 +308,103 @@ export class Player {
     return { dashed }
   }
 
-  private updateSwordAnim(dt: number, moving: boolean) {
+  private updateSwordAnim(dt: number) {
     const armSwing = Math.sin(this.walkT) * 0.62 * this.walkBlend
     const armBase  = 0.20
+    const lt = this.leanTarget  // stable value set before this call
 
     if (this.moveT > 0) {
       this.moveT = Math.max(0, this.moveT - dt)
-      const phase = 1 - this.moveT / this.moveDur
-      const arc   = Math.sin(phase * Math.PI)  // 0→1→0
+      const phase = 1 - this.moveT / this.moveDur  // 0→1 as move plays
+      const arc   = Math.sin(phase * Math.PI)       // 0→1→0 envelope
 
       switch (this.moveType) {
         case 'slash': {
-          // Quick forward diagonal slash
-          this.rShoulder.rotation.x = armBase + arc * (-3.2)
-          this.rElbow.rotation.x    = arc * 1.6
-          this.rShoulder.rotation.z = -0.15 - arc * 0.45
-          this.lShoulder.rotation.x = armBase - arc * 0.7
-          this.lElbow.rotation.x    = arc * 0.4
-          this.bodyGroup.rotation.z = arc * 0.18
+          this.rShoulder.rotation.x = armBase + arc * (-3.4)
+          this.rElbow.rotation.x    = arc * 1.7
+          this.rShoulder.rotation.z = -0.15 - arc * 0.50
+          this.lShoulder.rotation.x = armBase - arc * 0.75
+          this.lElbow.rotation.x    = arc * 0.42
+          this.bodyGroup.rotation.z = arc * 0.22
           break
         }
 
         case 'heavy': {
-          // Overhead slam — both arms swing up then down hard
-          const wind = phase < 0.35 ? phase / 0.35 : 1  // windup phase
-          const slam = phase < 0.35 ? 0 : (phase - 0.35) / 0.65
-          const slamArc = Math.sin(slam * Math.PI)
-          this.rShoulder.rotation.x = 1.4 * wind - 3.8 * slamArc + armBase
-          this.lShoulder.rotation.x = 1.2 * wind - 3.2 * slamArc + armBase
-          this.rElbow.rotation.x    = 1.1 * wind + slamArc * 2.2
-          this.lElbow.rotation.x    = 0.9 * wind + slamArc * 1.8
-          this.bodyGroup.rotation.x += slamArc * 0.45 - wind * 0.22
-          this.bodyGroup.rotation.z = arc * 0.08
+          const wind    = Math.min(1, phase / 0.35)
+          const slamT   = phase < 0.35 ? 0 : (phase - 0.35) / 0.65
+          const slamArc = Math.sin(slamT * Math.PI)
+          this.rShoulder.rotation.x = armBase + 1.5 * wind - 4.0 * slamArc
+          this.lShoulder.rotation.x = armBase + 1.3 * wind - 3.4 * slamArc
+          this.rElbow.rotation.x    = 1.2 * wind + slamArc * 2.4
+          this.lElbow.rotation.x    = 1.0 * wind + slamArc * 2.0
+          this.bodyGroup.rotation.x = lt + slamArc * 0.48 - wind * 0.24
+          this.bodyGroup.rotation.z = arc * 0.10
           break
         }
 
         case 'flurry': {
-          // Rapid alternating two-hit: two quick arcs
-          const t2 = (phase * 2) % 1
-          const flurryArc = Math.sin(t2 * Math.PI)
-          const side = Math.floor(phase * 2) % 2 === 0 ? 1 : -1
-          this.rShoulder.rotation.x = armBase + side * flurryArc * (-2.8)
-          this.rElbow.rotation.x    = flurryArc * 1.4
-          this.lShoulder.rotation.x = armBase - side * flurryArc * 1.6
-          this.lElbow.rotation.x    = flurryArc * 0.8
-          this.rShoulder.rotation.z = -0.07 - side * flurryArc * 0.35
+          const t2       = (phase * 2) % 1
+          const fArc     = Math.sin(t2 * Math.PI)
+          const side     = Math.floor(phase * 2) % 2 === 0 ? 1 : -1
+          this.rShoulder.rotation.x = armBase + side * fArc * (-3.0)
+          this.rElbow.rotation.x    = fArc * 1.5
+          this.lShoulder.rotation.x = armBase - side * fArc * 1.7
+          this.lElbow.rotation.x    = fArc * 0.85
+          this.rShoulder.rotation.z = -0.07 - side * fArc * 0.38
           break
         }
 
         case 'whirlwind': {
-          // 360° spin — arms extended outward, whole mesh spins
-          this.spinOffset = phase * Math.PI * 2
-          this.mesh.rotation.y = this.yaw + this.spinOffset
-          this.rShoulder.rotation.x = -0.3
-          this.lShoulder.rotation.x = -0.3
-          this.rShoulder.rotation.z = -Math.PI / 2 - 0.2 // arm fully extended
-          this.lShoulder.rotation.z =  Math.PI / 2 + 0.2
+          this.spinOffset       = phase * Math.PI * 2
+          this.mesh.rotation.y  = this.yaw + this.spinOffset
+          this.rShoulder.rotation.x = -0.32
+          this.lShoulder.rotation.x = -0.32
+          this.rShoulder.rotation.z = -(Math.PI / 2) - 0.22
+          this.lShoulder.rotation.z =  (Math.PI / 2) + 0.22
           this.rElbow.rotation.x    = -0.1
           this.lElbow.rotation.x    = -0.1
-          this.bodyGroup.position.y += Math.sin(phase * Math.PI) * 0.22
+          this.bodyGroup.position.y += Math.sin(phase * Math.PI) * 0.24
           break
         }
 
         case 'devastate': {
-          // Wind up, then massive forward thrust + body lunge
-          const windup = phase < 0.4 ? -(phase / 0.4) : 0
-          const strike = phase >= 0.4 ? Math.sin(((phase - 0.4) / 0.6) * Math.PI) : 0
-          this.rShoulder.rotation.x = armBase + windup * 1.8 + strike * (-4.5)
-          this.lShoulder.rotation.x = armBase + windup * 1.4 + strike * (-3.8)
-          this.rElbow.rotation.x    = -windup * 0.8 + strike * 2.5
-          this.lElbow.rotation.x    = -windup * 0.6 + strike * 2.0
-          this.bodyGroup.rotation.x = leanBaseX(this.bodyGroup) + windup * (-0.3) + strike * 0.55
-          this.rShoulder.rotation.z = -0.07 - strike * 0.3
-          this.bodyGroup.position.z = strike * (-0.35) // lunge forward
+          // Three distinct phases: windup → strike → recovery
+          const W = 0.35, S = 0.72  // phase boundaries
+          if (phase <= W) {
+            // Windup: arms pull back and up, body leans back
+            const t = phase / W
+            this.rShoulder.rotation.x = armBase + t * 2.8
+            this.lShoulder.rotation.x = armBase + t * 2.5
+            this.rElbow.rotation.x    = t * (-0.95)
+            this.lElbow.rotation.x    = t * (-0.80)
+            this.bodyGroup.rotation.x = lt - t * 0.42
+            this.bodyGroup.position.z = 0
+          } else if (phase <= S) {
+            // Strike: massive forward slam
+            const t    = (phase - W) / (S - W)  // 0→1
+            const sArc = Math.sin(t * Math.PI)   // rises and falls
+            this.rShoulder.rotation.x = armBase + 2.8 - t * 7.4
+            this.lShoulder.rotation.x = armBase + 2.5 - t * 6.8
+            this.rElbow.rotation.x    = -0.95 + t * 3.6
+            this.lElbow.rotation.x    = -0.80 + t * 3.2
+            this.bodyGroup.rotation.x = lt - 0.42 + sArc * 0.82
+            this.bodyGroup.position.z = -sArc * 0.62  // lunge forward
+            this.rShoulder.rotation.z = -0.07 - sArc * 0.35
+          } else {
+            // Recovery: ease back to idle
+            const t    = (phase - S) / (1 - S)
+            const ease = 1 - (1 - t) * (1 - t)
+            // At end of strike (t=1 in strike phase): rShoulder = armBase + 2.8 - 7.4 = armBase - 4.6
+            const rSPeak = armBase - 4.6
+            const lSPeak = armBase - 4.3
+            this.rShoulder.rotation.x = rSPeak + ease * (armBase - rSPeak)
+            this.lShoulder.rotation.x = lSPeak + ease * (armBase - lSPeak)
+            this.rElbow.rotation.x    = 2.65 * (1 - ease)
+            this.lElbow.rotation.x    = 2.40 * (1 - ease)
+            this.bodyGroup.rotation.x = lt + (0.40) * (1 - ease)
+            this.bodyGroup.position.z = 0
+            this.rShoulder.rotation.z = -0.07
+          }
           break
         }
       }
@@ -412,7 +442,3 @@ export class Player {
   get dashReady()  { return this.dashCd <= 0 }
 }
 
-// Helper — reads current bodyGroup.rotation.x without the animation override
-function leanBaseX(bg: THREE.Group) {
-  return bg.rotation.x
-}
