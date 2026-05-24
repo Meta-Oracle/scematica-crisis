@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { NeuralBrain } from './NeuralBrain'
 
 export type EnemyType = 'grunt' | 'rusher' | 'heavy'
 
@@ -13,9 +14,9 @@ interface Cfg {
 }
 
 const CFGS: Record<EnemyType, Cfg> = {
-  grunt:  { speed: 3.0, hp: 2, damage: 10, scale: 1.0,  color: 0xff2222, reward: 100, attackRate: 1.2 },
-  rusher: { speed: 6.5, hp: 1, damage: 6,  scale: 0.75, color: 0xff8800, reward: 150, attackRate: 0.8 },
-  heavy:  { speed: 1.8, hp: 6, damage: 28, scale: 1.6,  color: 0xaa00ff, reward: 350, attackRate: 2.0 },
+  grunt:  { speed: 4.5, hp: 2, damage: 10, scale: 1.0,  color: 0xff2222, reward: 100, attackRate: 1.1 },
+  rusher: { speed: 9.0, hp: 1, damage: 7,  scale: 0.75, color: 0xff8800, reward: 150, attackRate: 0.7 },
+  heavy:  { speed: 2.8, hp: 7, damage: 32, scale: 1.6,  color: 0xaa00ff, reward: 350, attackRate: 1.8 },
 }
 
 function easeOutBack(t: number) {
@@ -29,24 +30,28 @@ export class Enemy {
   readonly mesh: THREE.Group
   hp: number
   isDead = false
+  readonly brain: NeuralBrain
 
   private cfg: Cfg
-  private atkCd = 0
-  private bob = 0
-  private spawnT = 0
-  private walkBlend = 0
+  private atkCd    = 0
+  private bob      = 0
+  private spawnT   = 0
+  private aliveT   = 0
+  private walkBlend= 0
+  private atkAnimT = 0
 
   private bodyMat: THREE.MeshStandardMaterial
   private headMesh: THREE.Mesh
-  private leftArmPivot!: THREE.Group
-  private rightArmPivot!: THREE.Group
-  private leftLegPivot!: THREE.Group
-  private rightLegPivot!: THREE.Group
+  private leftArmPivot:  THREE.Group
+  private rightArmPivot: THREE.Group
+  private leftLegPivot:  THREE.Group
+  private rightLegPivot: THREE.Group
 
-  constructor(scene: THREE.Scene, spawn: THREE.Vector3, type: EnemyType) {
-    this.type = type
-    this.cfg = CFGS[type]
-    this.hp = this.cfg.hp
+  constructor(scene: THREE.Scene, spawn: THREE.Vector3, type: EnemyType, brain: NeuralBrain) {
+    this.type   = type
+    this.cfg    = CFGS[type]
+    this.hp     = this.cfg.hp
+    this.brain  = brain
     this.position.copy(spawn)
 
     this.mesh = new THREE.Group()
@@ -56,118 +61,140 @@ export class Enemy {
     this.bodyMat = new THREE.MeshStandardMaterial({
       color: this.cfg.color,
       emissive: this.cfg.color,
-      emissiveIntensity: 0.5,
-      roughness: 0.4,
-      metalness: 0.4,
+      emissiveIntensity: 0.6,
+      roughness: 0.35,
+      metalness: 0.45,
     })
 
     // Torso
-    const body = new THREE.Mesh(new THREE.BoxGeometry(0.75 * s, 1.1 * s, 0.5 * s), this.bodyMat)
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.76 * s, 1.1 * s, 0.5 * s), this.bodyMat)
     body.position.y = 0.75 * s
     body.castShadow = true
     this.mesh.add(body)
+
+    // Glow chest strip
+    const strip = new THREE.Mesh(
+      new THREE.BoxGeometry(0.35 * s, 0.07 * s, 0.52 * s),
+      new THREE.MeshStandardMaterial({ color: this.cfg.color, emissive: this.cfg.color, emissiveIntensity: 3 })
+    )
+    strip.position.set(0, 1.0 * s, 0)
+    this.mesh.add(strip)
 
     // Head
     const headMat = new THREE.MeshStandardMaterial({
       color: this.cfg.color,
       emissive: this.cfg.color,
-      emissiveIntensity: 0.7,
+      emissiveIntensity: 0.9,
     })
-    this.headMesh = new THREE.Mesh(new THREE.SphereGeometry(0.26 * s, 8, 8), headMat)
-    this.headMesh.position.y = (1.35 + 0.26) * s
+    this.headMesh = new THREE.Mesh(new THREE.SphereGeometry(0.27 * s, 8, 8), headMat)
+    this.headMesh.position.y = (1.35 + 0.27) * s
     this.headMesh.castShadow = true
     this.mesh.add(this.headMesh)
 
     // Arms
-    const armGeo = new THREE.BoxGeometry(0.2 * s, 0.6 * s, 0.2 * s)
-    const lArmPivot = new THREE.Group()
-    lArmPivot.position.set(-0.475 * s, 1.25 * s, 0)
-    const lArmMesh = new THREE.Mesh(armGeo, this.bodyMat)
-    lArmMesh.position.y = -0.3 * s
-    lArmMesh.castShadow = true
-    lArmPivot.add(lArmMesh)
-    this.mesh.add(lArmPivot)
-    this.leftArmPivot = lArmPivot
-
-    const rArmPivot = new THREE.Group()
-    rArmPivot.position.set(0.475 * s, 1.25 * s, 0)
-    const rArmMesh = new THREE.Mesh(armGeo.clone(), this.bodyMat)
-    rArmMesh.position.y = -0.3 * s
-    rArmMesh.castShadow = true
-    rArmPivot.add(rArmMesh)
-    this.mesh.add(rArmPivot)
-    this.rightArmPivot = rArmPivot
+    const armGeo = new THREE.BoxGeometry(0.21 * s, 0.62 * s, 0.21 * s)
+    this.leftArmPivot  = new THREE.Group(); this.leftArmPivot.position.set(-0.48 * s, 1.26 * s, 0)
+    this.rightArmPivot = new THREE.Group(); this.rightArmPivot.position.set( 0.48 * s, 1.26 * s, 0)
+    for (const piv of [this.leftArmPivot, this.rightArmPivot]) {
+      const arm = new THREE.Mesh(armGeo.clone(), this.bodyMat); arm.position.y = -0.31 * s; arm.castShadow = true
+      piv.add(arm); this.mesh.add(piv)
+    }
 
     // Legs
-    const legGeo = new THREE.BoxGeometry(0.24 * s, 0.62 * s, 0.24 * s)
-    const lLegPivot = new THREE.Group()
-    lLegPivot.position.set(-0.19 * s, 0.3 * s, 0)
-    const lLegMesh = new THREE.Mesh(legGeo, this.bodyMat)
-    lLegMesh.position.y = -0.31 * s
-    lLegMesh.castShadow = true
-    lLegPivot.add(lLegMesh)
-    this.mesh.add(lLegPivot)
-    this.leftLegPivot = lLegPivot
-
-    const rLegPivot = new THREE.Group()
-    rLegPivot.position.set(0.19 * s, 0.3 * s, 0)
-    const rLegMesh = new THREE.Mesh(legGeo.clone(), this.bodyMat)
-    rLegMesh.position.y = -0.31 * s
-    rLegMesh.castShadow = true
-    rLegPivot.add(rLegMesh)
-    this.mesh.add(rLegPivot)
-    this.rightLegPivot = rLegPivot
+    const legGeo = new THREE.BoxGeometry(0.25 * s, 0.65 * s, 0.25 * s)
+    this.leftLegPivot  = new THREE.Group(); this.leftLegPivot.position.set(-0.2 * s, 0.3 * s, 0)
+    this.rightLegPivot = new THREE.Group(); this.rightLegPivot.position.set( 0.2 * s, 0.3 * s, 0)
+    for (const piv of [this.leftLegPivot, this.rightLegPivot]) {
+      const leg = new THREE.Mesh(legGeo.clone(), this.bodyMat); leg.position.y = -0.325 * s; leg.castShadow = true
+      piv.add(leg); this.mesh.add(piv)
+    }
 
     this.mesh.position.copy(this.position)
     scene.add(this.mesh)
   }
 
-  update(dt: number, target: THREE.Vector3): number {
+  update(dt: number, target: THREE.Vector3, waveNum: number, nearbyCount: number): number {
     if (this.isDead) return 0
 
-    // Spawn pop-in animation
+    this.aliveT += dt
+    this.atkCd = Math.max(0, this.atkCd - dt)
+
+    // Spawn pop-in
     if (this.spawnT < 1) {
       this.spawnT = Math.min(1, this.spawnT + dt * 5)
-      const sc = Math.max(0, easeOutBack(this.spawnT))
-      this.mesh.scale.setScalar(sc)
+      this.mesh.scale.setScalar(Math.max(0, easeOutBack(this.spawnT)))
     }
-
-    this.atkCd = Math.max(0, this.atkCd - dt)
 
     const toTarget = new THREE.Vector3().subVectors(target, this.position)
     toTarget.y = 0
     const dist = toTarget.length()
+    const dirNorm = toTarget.clone().normalize()
 
-    const moving = dist > 1.4
+    // Neural network decision
+    const inputs = [
+      Math.min(dist, 40) / 40,
+      (Math.atan2(dirNorm.x, dirNorm.z) / Math.PI + 1) * 0.5,
+      Math.min(waveNum, 10) / 10,
+      this.hp / this.cfg.hp,
+      Math.min(nearbyCount, 6) / 6,
+    ]
+    const [aggression, circleTend, zigzag] = this.brain.forward(inputs)
+
+    // Effective engage distance (cautious brains hang back)
+    const engageDist = 1.4 + (1 - aggression) * 8
+
+    const moving = dist > engageDist
     if (moving) {
-      toTarget.normalize()
-      this.position.addScaledVector(toTarget, this.cfg.speed * dt)
+      this.position.addScaledVector(dirNorm, this.cfg.speed * dt)
+
+      // Circling behaviour
+      if (circleTend > 0.55 && dist < 18) {
+        const perp = new THREE.Vector3(-dirNorm.z, 0, dirNorm.x)
+        const dir  = circleTend > 0.75 ? 1 : -1
+        this.position.addScaledVector(perp, dir * this.cfg.speed * 0.55 * dt)
+      }
+
+      // Zigzag approach
+      if (zigzag > 0.60) {
+        const perp = new THREE.Vector3(-dirNorm.z, 0, dirNorm.x)
+        this.position.addScaledVector(perp, Math.sin(this.aliveT * 5.5) * this.cfg.speed * 0.35 * dt)
+      }
     }
 
-    // Bob / step oscillator
+    // Bob & animation
     this.bob += dt * this.cfg.speed * 2.8
+    const walkTarget = moving ? 1 : 0
+    this.walkBlend += (walkTarget - this.walkBlend) * Math.min(1, dt * 9)
 
-    // Walk blend
-    const targetBlend = moving ? 1 : 0
-    this.walkBlend += (targetBlend - this.walkBlend) * Math.min(1, dt * 10)
-
-    // Limb animation
-    const swing = Math.sin(this.bob) * 0.6 * this.walkBlend
+    const swing = Math.sin(this.bob) * 0.85 * this.walkBlend
     this.leftArmPivot.rotation.x  =  swing
     this.rightArmPivot.rotation.x = -swing
     this.leftLegPivot.rotation.x  = -swing
     this.rightLegPivot.rotation.x  =  swing
 
-    // Vertical bob
+    // Attack animation (arms lunge forward)
+    if (this.atkAnimT > 0) {
+      this.atkAnimT = Math.max(0, this.atkAnimT - dt / 0.22)
+      const arc = Math.sin(this.atkAnimT * Math.PI)
+      this.leftArmPivot.rotation.x  = -arc * 1.6
+      this.rightArmPivot.rotation.x = -arc * 1.6
+    }
+
+    // Telegraph: pulse emissive before attacking
+    if (this.atkCd < 0.25 && this.atkCd > 0) {
+      this.bodyMat.emissiveIntensity = 1.8 + Math.sin(this.aliveT * 30) * 0.8
+    } else if (!this.isDead) {
+      this.bodyMat.emissiveIntensity = 0.6
+    }
+
+    // Body bob
     this.mesh.position.copy(this.position)
-    this.mesh.position.y = Math.abs(Math.sin(this.bob)) * 0.1 * this.walkBlend
+    this.mesh.position.y = Math.abs(Math.sin(this.bob)) * 0.12 * this.walkBlend
     this.mesh.lookAt(new THREE.Vector3(target.x, this.position.y, target.z))
 
     if (dist < 1.4 && this.atkCd <= 0) {
-      // Idle sway when attacking
-      this.leftArmPivot.rotation.x  = Math.sin(this.bob * 0.5) * 0.2
-      this.rightArmPivot.rotation.x = Math.sin(this.bob * 0.5 + Math.PI) * 0.2
-      this.atkCd = this.cfg.attackRate
+      this.atkCd    = this.cfg.attackRate
+      this.atkAnimT = 1.0
       return this.cfg.damage
     }
     return 0
@@ -175,25 +202,22 @@ export class Enemy {
 
   takeDamage(amount: number, headshot = false): boolean {
     this.hp -= headshot ? amount * 2 : amount
-    this.bodyMat.emissiveIntensity = 2.8
-    setTimeout(() => { if (!this.isDead) this.bodyMat.emissiveIntensity = 0.5 }, 90)
+    this.bodyMat.emissiveIntensity = 4.0
+    setTimeout(() => { if (!this.isDead) this.bodyMat.emissiveIntensity = 0.6 }, 80)
     if (this.hp <= 0) {
       this.isDead = true
-      this.mesh.visible = false  // hide immediately; ragdoll takes over
+      this.mesh.visible = false
       return true
     }
     return false
   }
 
-  remove(scene: THREE.Scene) {
-    scene.remove(this.mesh)
-  }
+  remove(scene: THREE.Scene) { scene.remove(this.mesh) }
 
-  headWorldPos(): THREE.Vector3 {
-    return this.headMesh.getWorldPosition(new THREE.Vector3())
-  }
+  headWorldPos(): THREE.Vector3 { return this.headMesh.getWorldPosition(new THREE.Vector3()) }
 
-  get color()  { return this.cfg.color }
-  get scale()  { return this.cfg.scale }
-  get reward() { return this.cfg.reward }
+  get aliveTime() { return this.aliveT }
+  get color()     { return this.cfg.color }
+  get scale()     { return this.cfg.scale }
+  get reward()    { return this.cfg.reward }
 }

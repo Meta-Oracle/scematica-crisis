@@ -1,20 +1,37 @@
 import * as THREE from 'three'
 import { InputManager } from './InputManager'
 import { Arena } from './Arena'
-import { Player } from './Player'
+import { Player, type SwordMove } from './Player'
 import { Camera } from './Camera'
 import { EnemyManager } from './EnemyManager'
 import { Combo } from './Combo'
 import { HUD } from './HUD'
 import { RagdollSystem } from './Ragdoll'
 import { BloodSystem } from './Blood'
+import { MobileControls } from './MobileControls'
 
-const MELEE_RANGE = 4.0
-const MELEE_DMG = [30, 45, 80] as const   // light, medium, finisher
-const MELEE_NAMES = ['SLASH', 'STRIKE', '⚡ FINISHER'] as const
-const SNIPER_DMG = 120
-const RELOAD_TIME = 1.6
-const WAVE_COUNTDOWN = 4.0
+const MELEE_RANGE = 4.2
+const MELEE_RANGES: Record<SwordMove, number> = {
+  slash:     MELEE_RANGE,
+  heavy:     5.0,
+  flurry:    MELEE_RANGE,
+  whirlwind: 6.5,   // AoE 360°
+  devastate: 7.0,   // AoE forward cone
+}
+const MELEE_DMG: Record<SwordMove, number> = {
+  slash:     32,
+  heavy:     65,
+  flurry:    28,    // per hit, hits 2-3 targets
+  whirlwind: 55,    // all enemies in range
+  devastate: 140,   // massive single/AoE
+}
+
+const SNIPER_BASE_DMG  = 120
+const SNIPER_CD_BASE   = 0.55
+const RELOAD_TIME      = 1.4
+const WAVE_COUNTDOWN   = 3.5
+const HS_STREAK_MAX    = 10
+const HS_STREAK_DECAY  = 3.5   // seconds without headshot to lose streak
 
 const SCREEN_CSS = `
   .sc { position:fixed;top:0;left:0;width:100%;height:100%;display:none;flex-direction:column;align-items:center;justify-content:center;background:rgba(5,5,16,.93);font-family:'Courier New',monospace;color:#00ffff;z-index:200; }
@@ -34,6 +51,7 @@ export class Game {
   private scene: THREE.Scene
   private clock: THREE.Clock
   private input: InputManager
+  private mobile: MobileControls
   private arena: Arena
   private player: Player
   private camera: Camera
@@ -53,11 +71,19 @@ export class Game {
   private reloading = false
   private reloadTimer = 0
   private sniperCd = 0
-  private meleeCd = 0
   private waveActive = false
   private waveCd = 0
   private gameOver = false
   private running = false
+
+  // Headshot streak / gun power
+  private hsStreak = 0
+  private hsTimer  = 0
+
+  // Sword combo input tracking
+  private lastSwordClickT = -1
+  private swordSeq: ('S' | 'D')[] = []
+  private seqDecay = 0
 
   private menuEl!: HTMLElement
   private goEl!: HTMLElement
@@ -71,18 +97,19 @@ export class Game {
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
     document.getElementById('app')!.appendChild(this.renderer.domElement)
 
-    this.scene = new THREE.Scene()
-    this.clock = new THREE.Clock()
-    this.input = new InputManager(this.renderer.domElement)
-    this.arena = new Arena(this.scene)
-    this.player = new Player(this.scene)
-    this.camera = new Camera(this.renderer)
+    this.scene   = new THREE.Scene()
+    this.clock   = new THREE.Clock()
+    this.input   = new InputManager(this.renderer.domElement)
+    this.mobile  = new MobileControls(this.input)
+    this.arena   = new Arena(this.scene)
+    this.player  = new Player(this.scene)
+    this.camera  = new Camera(this.renderer)
     this.enemies = new EnemyManager(this.scene)
-    this.combo = new Combo()
-    this.hud = new HUD()
+    this.combo   = new Combo()
+    this.hud     = new HUD()
     this.hud.hide()
     this.ragdolls = new RagdollSystem(this.scene)
-    this.blood = new BloodSystem(this.scene)
+    this.blood    = new BloodSystem(this.scene)
 
     this.buildScreens()
     this.showMenu()
@@ -90,8 +117,6 @@ export class Game {
     document.addEventListener('pointerlockchange', () => {
       if (document.pointerLockElement === this.renderer.domElement) {
         if (!this.running && !this.gameOver) this.startGame()
-      } else {
-        // Pointer released mid-game — keep running, just show a resume hint
       }
     })
 
@@ -104,16 +129,27 @@ export class Game {
       this.renderer.render(this.scene, this.camera.cam)
       return
     }
-    const dt = this.sniper ? rawDt * 0.28 : rawDt
+    const dt = this.sniper ? rawDt * 0.25 : rawDt
     this.update(dt, rawDt)
     this.renderer.render(this.scene, this.camera.cam)
     this.input.endFrame()
   }
 
   private update(dt: number, rawDt: number) {
-    // ── Input timers (use raw time so they feel snappy) ──
-    this.sniperCd  = Math.max(0, this.sniperCd  - rawDt)
-    this.meleeCd   = Math.max(0, this.meleeCd   - rawDt)
+    this.sniperCd = Math.max(0, this.sniperCd - rawDt)
+    this.mobile.update()
+
+    // ── Headshot streak decay ──
+    if (this.hsStreak > 0) {
+      this.hsTimer -= rawDt
+      if (this.hsTimer <= 0) this.hsStreak = 0
+    }
+
+    // ── Sword sequence decay ──
+    if (this.seqDecay > 0) {
+      this.seqDecay -= rawDt
+      if (this.seqDecay <= 0) this.swordSeq = []
+    }
 
     // ── Reload ──
     if (this.reloading) {
@@ -134,7 +170,8 @@ export class Game {
     this.player.setVisible(!this.sniper)
 
     // ── Player movement ──
-    this.player.update(dt, this.input, 0)
+    const { dashed } = this.player.update(dt, this.input, 0)
+    if (dashed) this.camera.shake(0.18)
 
     // ── Arena floor follows player ──
     this.arena.update(this.player.position)
@@ -142,10 +179,13 @@ export class Game {
     // ── Camera ──
     this.camera.update(rawDt, this.player, this.sniper)
 
-    // ── Shoot / Melee ──
+    // ── Shoot / Sword ──
     if (this.input.wasMousePressed(0)) {
-      if (this.sniper) this.doSnipe()
-      else             this.doMelee()
+      if (this.sniper) {
+        this.doSnipe()
+      } else {
+        this.doSword()
+      }
     }
 
     // ── Enemies ──
@@ -153,6 +193,7 @@ export class Game {
     if (dmg > 0) {
       this.hp = Math.max(0, this.hp - dmg)
       this.player.flash()
+      this.hud.addDamage(dmg)
       if (this.hp === 0) { this.endGame(); return }
     }
 
@@ -167,11 +208,12 @@ export class Game {
     if (this.waveActive) {
       if (this.enemies.count === 0) {
         this.waveActive = false
+        this.enemies.evolvePool()
         this.wave++
         this.waveCd = WAVE_COUNTDOWN
         this.hud.flash(`WAVE ${this.wave} INCOMING`, WAVE_COUNTDOWN - 0.5)
         this.ammo = this.maxAmmo
-        this.hp = Math.min(100, this.hp + 20)
+        this.hp = Math.min(100, this.hp + 25)
         this.reloading = false
       }
     } else {
@@ -180,63 +222,72 @@ export class Game {
     }
 
     // ── HUD ──
-    const meleeLbl = this.meleeCd > 0 ? MELEE_NAMES[this.combo.meleePos === 0 ? 2 : this.combo.meleePos - 1] : ''
     this.hud.update(
       this.hp, 100, this.ammo, this.maxAmmo,
       this.score, this.wave,
       this.combo.streak, this.combo.timerFrac,
       this.sniper,
       this.reloading, 1 - this.reloadTimer / RELOAD_TIME,
-      meleeLbl,
+      '',
+      this.player.dashReady,
+      this.hsStreak,
       rawDt
     )
   }
 
+  // ── Sniper shot ──
   private doSnipe() {
     if (this.reloading || this.sniperCd > 0) return
     if (this.ammo <= 0) { this.hud.flash('RELOAD! [R]', 1.2); return }
 
-    this.sniperCd = 0.7
+    const powerFrac = this.hsStreak / HS_STREAK_MAX
+    const dmg = Math.round(SNIPER_BASE_DMG * (1 + powerFrac * 2.5))
+    this.sniperCd = SNIPER_CD_BASE * (1 - powerFrac * 0.35)
     this.ammo--
 
     this.raycaster.setFromCamera(new THREE.Vector2(0, 0), this.camera.cam)
 
     let hit = false
+    let tracerEnd = this.camera.cam.position.clone().add(
+      new THREE.Vector3(0, 0, -80).applyQuaternion(this.camera.cam.quaternion)
+    )
+
     for (const e of this.enemies.all) {
       if (e.isDead) continue
       const box = new THREE.Box3().setFromObject(e.mesh)
       if (this.raycaster.ray.intersectsBox(box)) {
         const headPos = e.headWorldPos()
         const headDist = this.raycaster.ray.distanceToPoint(headPos)
-        const hs = headDist < 0.35
-        const killed = e.takeDamage(SNIPER_DMG, hs)
+        const hs = headDist < 0.38
+        const killed = e.takeDamage(dmg, hs)
         hit = true
+        tracerEnd = hs ? headPos.clone() : e.position.clone().setY(e.position.y + 1.0)
 
         if (hs) {
-          this.hud.flash('HEADSHOT!', 1)
-          // Explosive headshot blood burst
-          this.blood.splat(headPos, 60, 2.5)
-          this.blood.splat(headPos, 30, 1.5)
+          // Headshot — increase streak
+          this.hsStreak = Math.min(this.hsStreak + 1, HS_STREAK_MAX)
+          this.hsTimer  = HS_STREAK_DECAY
+          const label = this.hsStreak >= 8 ? `⚡ ULTRA ×${dmg}` : this.hsStreak >= 5 ? `HEADSHOT ×${dmg}` : 'HEADSHOT!'
+          this.hud.flash(label, 0.9)
+          this.blood.splat(headPos, 70 + this.hsStreak * 8, 2.5 + powerFrac * 1.5)
+          this.blood.splat(headPos, 35, 1.5)
         } else {
-          this.blood.splat(e.position.clone().setY(e.position.y + 1.0), 18, 1.0)
+          this.hsStreak = 0
+          this.blood.splat(e.position.clone().setY(e.position.y + 1.0), 20, 1.0)
         }
 
         if (killed) {
           this.combo.hit()
-          this.score += Math.floor(e.reward * (hs ? 2 : 1) * this.combo.multiplier)
+          this.score += Math.floor(e.reward * (hs ? 2 : 1) * this.combo.multiplier * (1 + powerFrac))
+          this.enemies.recordKill(e)
           this.ragdolls.spawnRagdoll(e.position.clone(), e.color, e.scale)
-          if (!hs) this.blood.splat(e.position.clone().setY(e.position.y + 0.8), 35, 1.8)
+          if (!hs) this.blood.splat(e.position.clone().setY(e.position.y + 0.8), 40, 1.8)
         }
-
-        this.spawnTracer(this.camera.cam.position, headPos)
         break
       }
     }
 
-    if (!hit) this.spawnTracer(this.camera.cam.position,
-      this.camera.cam.position.clone().add(
-        new THREE.Vector3(0, 0, -80).applyQuaternion(this.camera.cam.quaternion)
-      ))
+    this.spawnLightningTracer(this.camera.cam.position, tracerEnd, this.hsStreak)
 
     if (this.ammo === 0 && !this.reloading) {
       this.reloading = true
@@ -245,13 +296,43 @@ export class Game {
     }
   }
 
-  private doMelee() {
-    if (this.meleeCd > 0) return
-    const pos = this.combo.meleeTap()
-    const dmg = MELEE_DMG[pos]
-    const aoe = pos === 2 // finisher is AoE
-    const range = aoe ? 5.5 : MELEE_RANGE
-    this.meleeCd = 0.32
+  // ── Sword attack ──
+  private doSword() {
+    const now = performance.now() / 1000
+    const dtSinceLast = now - this.lastSwordClickT
+    const isDouble = this.lastSwordClickT >= 0 && dtSinceLast < 0.22
+
+    this.lastSwordClickT = now
+
+    if (isDouble) {
+      // Replace pending 'S' with 'D'
+      if (this.swordSeq.length > 0 && this.swordSeq[this.swordSeq.length - 1] === 'S') {
+        this.swordSeq.pop()
+      }
+      this.swordSeq.push('D')
+    } else {
+      this.swordSeq.push('S')
+    }
+    if (this.swordSeq.length > 3) this.swordSeq.shift()
+    this.seqDecay = 1.2
+
+    const move = this.classifySwordSeq()
+    this.executeSword(move)
+  }
+
+  private classifySwordSeq(): SwordMove {
+    const s = this.swordSeq.join('')
+    if (s.endsWith('SSD')) return 'devastate'
+    if (s.endsWith('DD'))  return 'whirlwind'
+    if (s.endsWith('SS'))  return 'flurry'
+    if (s.endsWith('D'))   return 'heavy'
+    return 'slash'
+  }
+
+  private executeSword(move: SwordMove) {
+    const range  = MELEE_RANGES[move]
+    const dmg    = MELEE_DMG[move]
+    const is360  = move === 'whirlwind'
 
     let hitAny = false
     for (const e of this.enemies.all) {
@@ -259,44 +340,135 @@ export class Game {
       const dist = e.position.distanceTo(this.player.position)
       if (dist > range) continue
 
-      if (!aoe) {
-        // arc check: enemy must be roughly in front
+      if (!is360 && move !== 'devastate') {
+        // Arc check: enemy must be roughly in front
         const toEnemy = new THREE.Vector3().subVectors(e.position, this.player.position).normalize()
         const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(
           new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), this.player.yaw)
         )
-        if (toEnemy.dot(forward) < 0.15) continue // behind
+        if (toEnemy.dot(forward) < 0.1) continue
       }
 
-      const killed = e.takeDamage(dmg)
+      // Flurry hits multiple enemies for lower individual damage
+      const hitDmg = move === 'flurry' ? Math.round(dmg * (0.8 + Math.random() * 0.4)) : dmg
+      const killed = e.takeDamage(hitDmg)
       hitAny = true
       const hitPos = e.position.clone().setY(e.position.y + 1.0)
+
       if (killed) {
         this.combo.hit()
-        this.score += Math.floor(e.reward * 1.6 * this.combo.multiplier)
+        const bonus = move === 'devastate' ? 2.2 : move === 'whirlwind' ? 1.9 : 1.6
+        this.score += Math.floor(e.reward * bonus * this.combo.multiplier)
+        this.enemies.recordKill(e)
         this.ragdolls.spawnRagdoll(e.position.clone(), e.color, e.scale)
-        this.blood.splat(hitPos, 40, aoe ? 2.2 : 1.6)
+        this.blood.splat(hitPos, 45 + (move === 'devastate' ? 25 : 0), is360 ? 2.4 : 1.8)
       } else {
-        this.blood.splat(hitPos, 12, 0.8)
+        this.blood.splat(hitPos, 14, 0.9)
       }
     }
 
+    this.player.triggerMeleeAnim(move)
+    this.hud.showSwordMove(move)
     if (hitAny) {
-      this.hud.flash(MELEE_NAMES[pos], 0.6)
-      this.hud.showMeleeHit(pos as 0 | 1 | 2)
-      this.player.triggerMeleeAnim(pos as 0 | 1 | 2)
-      const shakeAmts = [0.12, 0.22, 0.48] as const
-      this.camera.shake(shakeAmts[pos])
+      this.hud.showMeleeHit(move)
+    }
+
+    const shakeAmts: Record<SwordMove, number> = {
+      slash: 0.10, heavy: 0.28, flurry: 0.18, whirlwind: 0.38, devastate: 0.60,
+    }
+    if (hitAny) this.camera.shake(shakeAmts[move])
+  }
+
+  // ── Lightning tracer ──
+  private spawnLightningTracer(from: THREE.Vector3, to: THREE.Vector3, streak: number) {
+    const powerFrac = streak / HS_STREAK_MAX   // 0..1
+
+    // Color interpolation: dark blue → neon blue → indigo → purple
+    const colorA = lerpHex(0x001166, 0x330055, powerFrac)
+    const colorB = lerpHex(0x00aaff, 0xcc00ff, powerFrac)
+
+    const segments = Math.max(2, Math.round(2 + powerFrac * 10))
+    const jitter   = powerFrac * 3.2   // max zigzag displacement
+
+    // Spawn 1-3 overlapping traces for lightning "branching"
+    const branchCount = 1 + Math.floor(powerFrac * 2.5)
+
+    for (let b = 0; b < branchCount; b++) {
+      const pts: THREE.Vector3[] = []
+      const cols: number[] = []
+
+      for (let i = 0; i <= segments; i++) {
+        const t = i / segments
+        const p = from.clone().lerp(to, t)
+
+        if (i > 0 && i < segments) {
+          const off = jitter * (Math.random() - 0.5)
+          const perp = new THREE.Vector3(-(to.z - from.z), 0, to.x - from.x).normalize()
+          p.addScaledVector(perp, off)
+          p.y += jitter * 0.5 * (Math.random() - 0.5)
+        }
+
+        pts.push(p)
+
+        // Vertex color: dark at start, bright at end
+        const [r, g, blue] = hexToRGB(lerpHex(colorA, colorB, t))
+        cols.push(r, g, blue)
+      }
+
+      const geo = new THREE.BufferGeometry().setFromPoints(pts)
+      geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3))
+
+      const mat = new THREE.LineBasicMaterial({
+        vertexColors: true,
+        transparent: true,
+        opacity: 0.85 + (b === 0 ? 0 : -0.3),
+        linewidth: 1,
+      })
+
+      const line = new THREE.Line(geo, mat)
+      this.scene.add(line)
+
+      // Lightning "flicker" — for high power, rapidly redraw
+      const lifetime = 60 + powerFrac * 80  // ms
+      if (powerFrac > 0.4 && b === 0) {
+        // Spawn a secondary redraw for flicker effect
+        setTimeout(() => {
+          this.scene.remove(line)
+          this.spawnLightningBolt(from, to, powerFrac, colorA, colorB, segments, jitter * 0.7)
+        }, lifetime * 0.5)
+      }
+      setTimeout(() => this.scene.remove(line), lifetime)
     }
   }
 
-  private spawnTracer(from: THREE.Vector3, to: THREE.Vector3) {
-    const pts = [from.clone(), to.clone()]
+  private spawnLightningBolt(
+    from: THREE.Vector3, to: THREE.Vector3,
+    powerFrac: number,
+    colorA: number, colorB: number,
+    segments: number, jitter: number
+  ) {
+    const pts: THREE.Vector3[] = []
+    const cols: number[] = []
+
+    for (let i = 0; i <= segments; i++) {
+      const t = i / segments
+      const p = from.clone().lerp(to, t)
+      if (i > 0 && i < segments) {
+        const perp = new THREE.Vector3(-(to.z - from.z), 0, to.x - from.x).normalize()
+        p.addScaledVector(perp, jitter * (Math.random() - 0.5))
+        p.y += jitter * 0.5 * (Math.random() - 0.5)
+      }
+      pts.push(p)
+      const [r, g, b] = hexToRGB(lerpHex(colorA, colorB, t))
+      cols.push(r, g, b)
+    }
+
     const geo = new THREE.BufferGeometry().setFromPoints(pts)
-    const mat = new THREE.LineBasicMaterial({ color: 0xffff44, transparent: true, opacity: 0.85 })
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3))
+    const mat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.7 })
     const line = new THREE.Line(geo, mat)
     this.scene.add(line)
-    setTimeout(() => this.scene.remove(line), 80)
+    setTimeout(() => this.scene.remove(line), 50 + powerFrac * 40)
   }
 
   private launchWave() {
@@ -313,7 +485,11 @@ export class Game {
     this.ammo = this.maxAmmo
     this.reloading = false
     this.waveActive = false
-    this.waveCd = 2.5
+    this.waveCd = 2.0
+    this.hsStreak = 0
+    this.hsTimer  = 0
+    this.swordSeq = []
+    this.seqDecay = 0
     this.combo.reset()
     this.enemies.clear()
     this.ragdolls.clear()
@@ -322,7 +498,7 @@ export class Game {
     this.menuEl.classList.remove('vis')
     this.goEl.classList.remove('vis')
     this.hud.show()
-    this.hud.flash('WAVE 1 INCOMING', 2.2)
+    this.hud.flash('WAVE 1 INCOMING', 2.0)
     this.clock.start()
   }
 
@@ -348,27 +524,27 @@ export class Game {
     styleEl.textContent = SCREEN_CSS
     document.head.appendChild(styleEl)
 
-    // Menu
     this.menuEl = document.createElement('div')
     this.menuEl.className = 'sc'
     this.menuEl.innerHTML = `
       <h1>SCEMATICA</h1>
       <div class="sub">— CRISIS —</div>
       <div class="ctrl">
-        WASD — MOVE &nbsp;|&nbsp; MOUSE — AIM<br>
+        WASD — MOVE &nbsp;|&nbsp; SPACE — DASH<br>
         <b style="color:#00ffff">RMB HOLD</b> — SNIPER MODE &amp; TIME SLOW<br>
-        <b style="color:#00ffff">LMB</b> — SHOOT / MELEE COMBO<br>
+        <b style="color:#00ffff">LMB</b> — SWORD ATTACK &nbsp;|&nbsp; DOUBLE-CLICK — HEAVY<br>
+        <b style="color:#aa00ff">LMB COMBOS:</b> S+S=FLURRY &nbsp;|&nbsp; D+D=WHIRLWIND &nbsp;|&nbsp; S+S+D=DEVASTATE<br>
+        CONSECUTIVE HEADSHOTS CHARGE GUN POWER<br>
         R — RELOAD &nbsp;|&nbsp; ESC — UNLOCK CURSOR
       </div>
       <div class="cta">CLICK TO INFILTRATE</div>
-      <div class="hint">SURVIVE THE WAVES &bull; BUILD THE COMBO &bull; FIND THE RHYTHM</div>
+      <div class="hint">SURVIVE THE WAVES &bull; BUILD THE COMBO &bull; MASTER THE BLADE</div>
     `
     this.menuEl.addEventListener('click', () => {
       if (!this.input.isLocked) this.input.requestLock()
     })
     document.body.appendChild(this.menuEl)
 
-    // Game Over
     this.goEl = document.createElement('div')
     this.goEl.className = 'sc'
     this.goEl.innerHTML = `
@@ -385,4 +561,18 @@ export class Game {
     })
     document.body.appendChild(this.goEl)
   }
+}
+
+// ── Colour utilities ──
+function lerpHex(a: number, b: number, t: number): number {
+  const ar = (a >> 16) & 0xff, ag = (a >> 8) & 0xff, ab = a & 0xff
+  const br = (b >> 16) & 0xff, bg = (b >> 8) & 0xff, bb = b & 0xff
+  const r = Math.round(ar + (br - ar) * t)
+  const g = Math.round(ag + (bg - ag) * t)
+  const bl = Math.round(ab + (bb - ab) * t)
+  return (r << 16) | (g << 8) | bl
+}
+
+function hexToRGB(hex: number): [number, number, number] {
+  return [((hex >> 16) & 0xff) / 255, ((hex >> 8) & 0xff) / 255, (hex & 0xff) / 255]
 }
