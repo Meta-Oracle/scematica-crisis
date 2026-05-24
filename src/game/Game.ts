@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { InputManager } from './InputManager'
-import { Arena, ARENA_HALF } from './Arena'
+import { Arena } from './Arena'
 import { Player } from './Player'
 import { Camera } from './Camera'
 import { EnemyManager } from './EnemyManager'
@@ -134,7 +134,10 @@ export class Game {
     this.player.setVisible(!this.sniper)
 
     // ── Player movement ──
-    this.player.update(dt, this.input, ARENA_HALF)
+    this.player.update(dt, this.input, 0)
+
+    // ── Arena floor follows player ──
+    this.arena.update(this.player.position)
 
     // ── Camera ──
     this.camera.update(rawDt, this.player, this.sniper)
@@ -281,6 +284,7 @@ export class Game {
     if (hitAny) {
       this.hud.flash(MELEE_NAMES[pos], 0.6)
       this.hud.showMeleeHit(pos as 0 | 1 | 2)
+      this.player.triggerMeleeAnim(pos as 0 | 1 | 2)
       const shakeAmts = [0.12, 0.22, 0.48] as const
       this.camera.shake(shakeAmts[pos])
     }
@@ -297,7 +301,7 @@ export class Game {
 
   private launchWave() {
     this.waveActive = true
-    this.enemies.spawnWave(this.wave)
+    this.enemies.spawnWave(this.wave, this.player.position)
   }
 
   private startGame() {

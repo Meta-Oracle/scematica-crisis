@@ -1,40 +1,34 @@
 import * as THREE from 'three'
 import { Enemy, type EnemyType } from './Enemy'
-import { ARENA_HALF } from './Arena'
-
-const SPAWN_PAD = 1.5
 
 export class EnemyManager {
   private list: Enemy[] = []
 
   constructor(private scene: THREE.Scene) {}
 
-  spawnWave(wave: number) {
-    const base = 4 + wave * 2
-    const heavyChance = Math.min(0.05 * (wave - 2), 0.3)
+  spawnWave(wave: number, playerPos: THREE.Vector3) {
+    const base         = 4 + wave * 2
+    const heavyChance  = Math.min(0.05 * (wave - 2), 0.3)
     const rusherChance = 0.3 + Math.min(wave * 0.04, 0.25)
 
     for (let i = 0; i < base; i++) {
       const r = Math.random()
       let type: EnemyType
-      if (wave >= 3 && r < heavyChance) type = 'heavy'
-      else if (r < rusherChance) type = 'rusher'
-      else type = 'grunt'
-      this.list.push(new Enemy(this.scene, this.randomEdgePos(), type))
+      if (wave >= 3 && r < heavyChance)        type = 'heavy'
+      else if (r < rusherChance)                type = 'rusher'
+      else                                      type = 'grunt'
+      this.list.push(new Enemy(this.scene, this.randomSpawnPos(playerPos), type))
     }
   }
 
-  private randomEdgePos(): THREE.Vector3 {
-    const side = Math.floor(Math.random() * 4)
-    const d = ARENA_HALF - SPAWN_PAD
-    const spread = (Math.random() * 2 - 1) * (ARENA_HALF - SPAWN_PAD)
-    const positions: THREE.Vector3[] = [
-      new THREE.Vector3(spread, 0, -d),
-      new THREE.Vector3(spread, 0,  d),
-      new THREE.Vector3(-d, 0, spread),
-      new THREE.Vector3( d, 0, spread),
-    ]
-    return positions[side]
+  private randomSpawnPos(playerPos: THREE.Vector3): THREE.Vector3 {
+    const angle  = Math.random() * Math.PI * 2
+    const radius = 24 + Math.random() * 14
+    return new THREE.Vector3(
+      playerPos.x + Math.cos(angle) * radius,
+      0,
+      playerPos.z + Math.sin(angle) * radius,
+    )
   }
 
   update(dt: number, targetPos: THREE.Vector3): number {
@@ -54,8 +48,7 @@ export class EnemyManager {
     return dmg
   }
 
-  get all() { return this.list }
-
+  get all()   { return this.list }
   get count() { return this.list.filter(e => !e.isDead).length }
 
   closest(pos: THREE.Vector3): { enemy: Enemy; dist: number } | null {
