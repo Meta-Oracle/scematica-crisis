@@ -51,18 +51,21 @@ export class Arena {
     floor.receiveShadow = true
     this.terrain.add(floor)
 
+    // Helper: THREE.js r152+ GridHelper uses one vertex-colored mat, older used two
+    const setGridOpacity = (grid: THREE.GridHelper, opacity: number) => {
+      const mats = Array.isArray(grid.material) ? grid.material : [grid.material]
+      mats.forEach(m => { (m as THREE.LineBasicMaterial).transparent = true; (m as THREE.LineBasicMaterial).opacity = opacity })
+    }
+
     // Minor grid (5-unit cells, dark blue)
     const minor = new THREE.GridHelper(GRID_SIZE, MINOR_DIVS, 0x001830, 0x001830)
-    const minorMats = (Array.isArray(minor.material) ? minor.material : [minor.material]) as THREE.LineBasicMaterial[]
-    minorMats.forEach(m => { m.transparent = true; m.opacity = 0.55 })
+    setGridOpacity(minor, 0.55)
     minor.position.y = 0.008
     this.terrain.add(minor)
 
     // Major grid (50-unit cells, bright cyan)
     const major = new THREE.GridHelper(GRID_SIZE, MAJOR_DIVS, 0x00ffcc, 0x004466)
-    const majMats = (Array.isArray(major.material) ? major.material : [major.material]) as THREE.LineBasicMaterial[]
-    majMats[0].transparent = true; majMats[0].opacity = 0.9
-    majMats[1].transparent = true; majMats[1].opacity = 0.35
+    setGridOpacity(major, 0.6)
     major.position.y = 0.014
     this.terrain.add(major)
   }
